@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import json
 import urllib.request
-import re
 import random
 import imaplib
 import email
@@ -14,7 +13,7 @@ st.set_page_config(page_title="Réserves & Stocks GL", page_icon="📦", layout=
 st.title("📦 Application Interne - Moteur de Recherche Stocks & Réserves")
 st.markdown("---")
 
-# Récupération sécurisée des accès via les Secrets Streamlit
+# Récupération sécurisée des accès
 try:
     SPREADSHEET_ID = st.secrets["DRIVE_SHEET_ID"]
     user_email = st.secrets["EMAIL_UTILISATEUR"]
@@ -23,39 +22,38 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction pour récupérer le dernier CSV de stock par mail
-@st.cache_data(ttl=3600)
+# Fonction automatique de lecture du mail (Version ultra-souple pour les tests)
+@st.cache_data(ttl=10) # Cache réduit à 10 secondes pour vos tests en direct
 def fetch_stock_from_gmail(username, password):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(username, password.replace(" ", ""))
         mail.select("inbox")
         
-        status, messages = mail.search(None, '(SUBJECT "STOCKS AUTOMATIQUES GLCE 3201")')
+        # Recherche uniquement par mot-clé dans le sujet (évite les blocages si "Tr:" est présent)
+        status, messages = mail.search(None, '(SUBJECT "STOCKS AUTOMATIQUES")')
         if status != "OK" or not messages[0]:
             return None
             
         mail_ids = messages[0].split()
-        latest_mail_id = mail_ids[-1]
-        
-        status, data = mail.fetch(latest_mail_id, "(RFC822)")
-        raw_email = data[0][1]
-        msg = email.message_from_bytes(raw_email)
-        
-        for part in msg.walk():
-            if part.get_content_maintype() == 'multipart':
-                continue
-            filename = part.get_filename()
-            if filename and filename.lower().endswith('.csv'):
-                csv_data = part.get_payload(decode=True)
-                df = pd.read_csv(io.BytesIO(csv_data), sep=',', encoding='utf-8', skiprows=1)
-                df.columns = [c.strip() for c in df.columns]
-                return df
+        for mail_id in reversed(mail_ids):
+            status, data = mail.fetch(mail_id, "(RFC822)")
+            raw_email = data[0][1]
+            msg = email.message_from_bytes(raw_email)
+            
+            for part in msg.walk():
+                if part.get_content_maintype() == 'multipart':
+                    continue
+                filename = part.get_filename()
+                if filename and filename.lower().endswith('.csv'):
+                    csv_data = part.get_payload(decode=True)
+                    df = pd.read_csv(io.BytesIO(csv_data), sep=',', encoding='utf-8', skiprows=1)
+                    df.columns = [c.strip() for c in df.columns]
+                    return df
         return None
     except Exception:
         return None
 
-# Chargement des bases logistiques depuis le Drive personnel via JSON
 def load_data_via_json_live(sheet_name):
     try:
         random_cache_buster = random.randint(1, 999999)
@@ -75,21 +73,19 @@ def load_data_via_json_live(sheet_name):
     except:
         return None
 
-# Chargement silencieux en arrière-plan (Entièrement invisible pour le vendeur)
 df_marques = load_data_via_json_live("marques")
 df_reserves = load_data_via_json_live("reserves")
 df_stock = fetch_stock_from_gmail(user_email, app_password)
 
-# Moteur de recherche unifié
 if df_marques is not None and df_reserves is not None:
     st.subheader("🔍 Barre de recherche unique (EAN, UG ou Désignation)")
-    search_query = st.text_input("Entrez un code EAN ou des mots-clés (ex: polo gris ralph, 0193693343711...) :", placeholder="Tapez ici...")
+    search_query = st.text_input("Entrez un code EAN ou des mots-clés (ex: polo gris ralph, carhartt...) :", placeholder="Tapez ici...")
     
     if search_query:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Impossible de charger le fichier de stock du matin. Vérifiez la boîte mail ou le sujet du message.")
+            st.error("⚠️ Fichier de stock introuvable dans la boîte personnelle. Assurez-vous que le mail contient bien le mot 'STOCKS AUTOMATIQUES' dans son sujet et possède le fichier .csv en pièce jointe.")
         else:
             if search_query.isdigit():
                 results = df_stock[df_stock['EAN (Principal)'].astype(str).str.contains(search_query, na=False)]
@@ -116,6 +112,6 @@ if df_marques is not None and df_reserves is not None:
                     nom_reserve = brand_row['Nom de RESERVE'] if 'Nom de RESERVE' in brand_row else "Non spécifiée"
                     st.markdown("---")
                     st.subheader(f"📍 Localisation Logistique : Réserve **{nom_reserve}**")
-                    st.info(f"Cette marque est rattachée à la réserve {nom_reserve}. Les plans et guidages vidéos s'afficheront ici.")
+                    st.info(f"Cette marque est rattachée à la réserve {nom_reserve}.")
             else:
                 st.error("❌ Aucun article correspondant dans le stock actuel.")
