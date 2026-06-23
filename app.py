@@ -6,6 +6,8 @@ import random
 import imaplib
 import email
 import io
+import re
+import zipfile
 
 # Configuration de l'application
 st.set_page_config(page_title="Réserves & Stocks GL", page_icon="📦", layout="centered")
@@ -22,15 +24,14 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction automatique de lecture du mail (Version ultra-souple pour les tests)
-@st.cache_data(ttl=10) # Cache réduit à 10 secondes pour vos tests en direct
+# Fonction de lecture automatique compatible ZIP et CSV (via pièces jointes ou liens Drive)
+@st.cache_data(ttl=10)
 def fetch_stock_from_gmail(username, password):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(username, password.replace(" ", ""))
         mail.select("inbox")
         
-        # Recherche uniquement par mot-clé dans le sujet (évite les blocages si "Tr:" est présent)
         status, messages = mail.search(None, '(SUBJECT "STOCKS AUTOMATIQUES")')
         if status != "OK" or not messages[0]:
             return None
@@ -41,15 +42,84 @@ def fetch_stock_from_gmail(username, password):
             raw_email = data[0][1]
             msg = email.message_from_bytes(raw_email)
             
+            # 1. Extraction du texte pour chercher un lien Google Drive (cas des fichiers lourds de l'ERP)
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type in ["text/plain", "text/html"]:
+                        try:
+                            body += part.get_payload(decode=True).decode('utf-8')
+                        except:
+                            pass
+            else:
+                body = msg.get_payload(decode=True).decode('utf-8')
+                
+            # Recherche d'un ID de fichier Google Drive
+            drive_match = re.search(r'https://drive\.google\.com/file/d/([a-zA-Z0-9-_]+)', body)
+            if drive_match:
+                file_id = drive_match.group(1)
+                # On tente d'abord de le télécharger comme un fichier brut
+                download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv"
+                try:
+                    req = urllib.request.Request(download_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        file_bytes = response.read()
+                    
+                    # Est-ce un fichier ZIP ?
+                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
+                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                            # On prend le premier fichier CSV présent dans le ZIP
+                            for zname in z.namelist():
+                                if zname.lower().endswith('.csv'):
+                                    with z.open(zname) as f:
+                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
+                                        df.columns = [c.strip() for c in df.columns]
+                                        return df
+                    else:
+                        # C'est un CSV direct
+                        df = pd.read_csv(io.BytesIO(file_bytes), sep=',', encoding='utf-8', skiprows=1)
+                        df.columns = [c.strip() for c in df.columns]
+                        return df
+                except:
+                    # Si l'export direct Google Sheet échoue (car c'est un vrai binaire ZIP stocké sur Drive)
+                    # On utilise l'URL de téléchargement direct des fichiers Drive
+                    alt_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                    req = urllib.request.Request(alt_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        file_bytes = response.read()
+                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
+                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                            for zname in z.namelist():
+                                if zname.lower().endswith('.csv'):
+                                    with z.open(zname) as f:
+                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
+                                        df.columns = [c.strip() for c in df.columns]
+                                        return df
+
+            # 2. Secours : Si l'ERP l'envoie en pièce jointe standard (sans lien Drive)
             for part in msg.walk():
                 if part.get_content_maintype() == 'multipart':
                     continue
                 filename = part.get_filename()
-                if filename and filename.lower().endswith('.csv'):
-                    csv_data = part.get_payload(decode=True)
-                    df = pd.read_csv(io.BytesIO(csv_data), sep=',', encoding='utf-8', skiprows=1)
-                    df.columns = [c.strip() for c in df.columns]
-                    return df
+                if filename:
+                    filename_lower = filename.lower()
+                    # Pièce jointe ZIP standard
+                    if filename_lower.endswith('.zip'):
+                        zip_data = part.get_payload(decode=True)
+                        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                            for zname in z.namelist():
+                                if zname.lower().endswith('.csv'):
+                                    with z.open(zname) as f:
+                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
+                                        df.columns = [c.strip() for c in df.columns]
+                                        return df
+                    # Pièce jointe CSV standard
+                    elif filename_lower.endswith('.csv'):
+                        csv_data = part.get_payload(decode=True)
+                        df = pd.read_csv(io.BytesIO(csv_data), sep=',', encoding='utf-8', skiprows=1)
+                        df.columns = [c.strip() for c in df.columns]
+                        return df
         return None
     except Exception:
         return None
@@ -85,7 +155,7 @@ if df_marques is not None and df_reserves is not None:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Fichier de stock introuvable dans la boîte personnelle. Assurez-vous que le mail contient bien le mot 'STOCKS AUTOMATIQUES' dans son sujet et possède le fichier .csv en pièce jointe.")
+            st.error("⚠️ Fichier de stock introuvable. Assurez-vous que le mail automatique contient bien le fichier ou son lien Drive, et que l'accès au lien est ouvert.")
         else:
             if search_query.isdigit():
                 results = df_stock[df_stock['EAN (Principal)'].astype(str).str.contains(search_query, na=False)]
