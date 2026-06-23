@@ -24,88 +24,53 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture automatique universelle (ZIP, CSV, Liens Drive, Pièces jointes)
-@st.cache_data(ttl=10)
+# Fonction de lecture ciblée sur l'expéditeur MicroStrategy
+@st.cache_data(ttl=5)
 def fetch_stock_from_gmail(username, password):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(username, password.replace(" ", ""))
         mail.select("inbox")
         
-        # Recherche ultra-large de n'importe quel mail contenant "STOCKS"
-        status, messages = mail.search(None, '(SUBJECT "STOCKS")')
+        # Recherche large dans la boîte de réception
+        status, messages = mail.search(None, 'ALL')
         if status != "OK" or not messages[0]:
             return None
             
         mail_ids = messages[0].split()
-        for mail_id in reversed(mail_ids):
+        # On inspecte les 15 derniers messages pour trouver le bon
+        for mail_id in reversed(mail_ids[-15:]):
             status, data = mail.fetch(mail_id, "(RFC822)")
             raw_email = data[0][1]
             msg = email.message_from_bytes(raw_email)
             
-            # 1. Traitement des pièces jointes directes dans le mail
-            for part in msg.walk():
-                if part.get_content_maintype() == 'multipart':
-                    continue
-                filename = part.get_filename()
-                if filename:
-                    filename_lower = filename.lower()
-                    # Si c'est un fichier ZIP attaché
-                    if filename_lower.endswith('.zip'):
-                        zip_data = part.get_payload(decode=True)
-                        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-                            for zname in z.namelist():
-                                # On prend le premier fichier de données trouvé (csv ou txt)
-                                if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                    with z.open(zname) as f:
-                                        df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                                        df.columns = [c.strip() for c in df.columns]
-                                        return df
-                    # Si c'est un fichier CSV attaché
-                    elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
-                        csv_data = part.get_payload(decode=True)
-                        df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                        df.columns = [c.strip() for c in df.columns]
-                        return df
-
-            # 2. Traitement si Gmail a converti le fichier lourd en Lien Google Drive
-            body = ""
-            if msg.is_multipart():
+            sujet = str(msg.get("Subject", "")).lower()
+            expediteur = str(msg.get("From", "")).lower()
+            
+            # Si le mail vient de MicroStrategy ou contient STOCKS
+            if "microstrategy" in expediteur or "stocks" in sujet:
                 for part in msg.walk():
-                    content_type = part.get_content_type()
-                    if content_type in ["text/plain", "text/html"]:
-                        try:
-                            body += part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                        except:
-                            pass
-            else:
-                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-                
-            drive_match = re.search(r'https://drive\.google\.com/file/d/([a-zA-Z0-9-_]+)', body)
-            if drive_match:
-                file_id = drive_match.group(1)
-                
-                # On essaie de le télécharger via l'adresse de téléchargement direct de fichiers Drive
-                alt_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                try:
-                    req = urllib.request.Request(alt_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req) as response:
-                        file_bytes = response.read()
-                    
-                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
-                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-                            for zname in z.namelist():
-                                if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                    with z.open(zname) as f:
-                                        df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                                        df.columns = [c.strip() for c in df.columns]
-                                        return df
-                    else:
-                        df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                        df.columns = [c.strip() for c in df.columns]
-                        return df
-                except:
-                    pass
+                    if part.get_content_maintype() == 'multipart':
+                        continue
+                    filename = part.get_filename()
+                    if filename:
+                        filename_lower = filename.lower()
+                        # Si c'est le fichier ZIP
+                        if filename_lower.endswith('.zip'):
+                            zip_data = part.get_payload(decode=True)
+                            with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                                for zname in z.namelist():
+                                    if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
+                                        with z.open(zname) as f:
+                                            df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
+                                            df.columns = [c.strip() for c in df.columns]
+                                            return df
+                        # Si c'est le fichier CSV direct
+                        elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
+                            csv_data = part.get_payload(decode=True)
+                            df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
+                            df.columns = [c.strip() for c in df.columns]
+                            return df
         return None
     except Exception:
         return None
@@ -141,9 +106,8 @@ if df_marques is not None and df_reserves is not None:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Fichier de stock introuvable. Assurez-vous que le mail automatique est bien arrivé sur votre boîte personnelle et contient la pièce jointe (CSV ou ZIP).")
+            st.error("⚠️ Fichier de stock introuvable dans la boîte mail. Vérifiez que le mail de MicroStrategy contenant le ZIP est bien présent.")
         else:
-            # On cherche les colonnes correspondantes de manière flexible
             col_ean = [c for c in df_stock.columns if 'ean' in c.lower()]
             col_article = [c for c in df_stock.columns if 'art' in c.lower() or 'lib' in c.lower() or 'des' in c.lower()]
             col_famille = [c for c in df_stock.columns if 'fam' in c.lower() or 'marq' in c.lower()]
@@ -164,7 +128,6 @@ if df_marques is not None and df_reserves is not None:
                 
             if not results.empty:
                 st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
-                # Affichage dynamique des colonnes disponibles
                 display_cols = [c for c in df_stock.columns if any(x in c.lower() for x in ['march', 'fam', 'art', 'ean', 'sto', 'qte', 'fin'])]
                 st.dataframe(results[display_cols if display_cols else df_stock.columns[:5]], use_container_width=True, hide_index=True)
                 
