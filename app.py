@@ -24,27 +24,20 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture avec affichage des étapes de diagnostic
+# Fonction de lecture universelle avec gestion automatique de l'encodage (Spécial MicroStrategy)
 def fetch_stock_from_gmail(username, password):
     logs = []
     try:
         logs.append("🔌 Connexion à imap.gmail.com...")
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        
-        logs.append(f"🔐 Tentative de connexion avec {username}...")
         mail.login(username, password.replace(" ", ""))
-        
-        logs.append("📂 Ouverture de la boîte de réception (INBOX)...")
         mail.select("inbox")
         
         status, messages = mail.search(None, 'ALL')
         if status != "OK" or not messages[0]:
-            logs.append("⚠️ Aucun message trouvé dans la boîte de réception.")
             return None, logs
             
         mail_ids = messages[0].split()
-        logs.append(f"📧 Nombre total de mails détectés : {len(mail_ids)}. Inspection des 15 derniers...")
-        
         for mail_id in reversed(mail_ids[-15:]):
             status, data = mail.fetch(mail_id, "(RFC822)")
             raw_email = data[0][1]
@@ -54,7 +47,7 @@ def fetch_stock_from_gmail(username, password):
             expediteur = str(msg.get("From", "")).lower()
             
             if "microstrategy" in expediteur or "stocks" in sujet:
-                logs.append(f"✅ Mail trouvé ! Sujet: '{msg.get('Subject')}' de {msg.get('From')}")
+                logs.append(f"✅ Mail détecté : '{msg.get('Subject')}'")
                 
                 for part in msg.walk():
                     if part.get_content_maintype() == 'multipart':
@@ -62,34 +55,43 @@ def fetch_stock_from_gmail(username, password):
                     filename = part.get_filename()
                     if filename:
                         filename_lower = filename.lower()
-                        logs.append(f"📎 Pièce jointe détectée : {filename}")
+                        logs.append(f"📎 Fichier trouvé : {filename}")
+                        
+                        # Définition des encodages à tester (MicroStrategy utilise souvent utf-16 ou latin-1)
+                        encodings_to_try = ['utf-16', 'utf-8', 'latin-1', 'cp1252']
                         
                         if filename_lower.endswith('.zip'):
-                            logs.append("📦 Analyse du fichier compressé ZIP...")
                             zip_data = part.get_payload(decode=True)
                             with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-                                logs.append(f"🗂️ Contenu du ZIP : {z.namelist()}")
                                 for zname in z.namelist():
                                     if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                        logs.append(f"📖 Lecture du fichier interne : {zname}")
-                                        with z.open(zname) as f:
-                                            df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                                            df.columns = [c.strip() for c in df.columns]
-                                            logs.append("🎉 Données chargées avec succès depuis le ZIP !")
-                                            return df, logs
+                                        logs.append(f"📖 Extraction et lecture de : {zname}")
+                                        content = z.read(zname)
+                                        
+                                        for encoding in encodings_to_try:
+                                            try:
+                                                df = pd.read_csv(io.BytesIO(content), sep=None, engine='python', encoding=encoding, skiprows=1, on_bad_lines='skip')
+                                                df.columns = [c.strip() for c in df.columns]
+                                                logs.append(f"🎉 Succès avec l'encodage {encoding} !")
+                                                return df, logs
+                                            except Exception as enc_err:
+                                                continue
                         
                         elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
-                            logs.append("📖 Lecture du fichier CSV direct...")
                             csv_data = part.get_payload(decode=True)
-                            df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
-                            df.columns = [c.strip() for c in df.columns]
-                            logs.append("🎉 Données chargées avec succès depuis le CSV direct !")
-                            return df, logs
+                            for encoding in encodings_to_try:
+                                try:
+                                    df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding=encoding, skiprows=1, on_bad_lines='skip')
+                                    df.columns = [c.strip() for c in df.columns]
+                                    logs.append(f"🎉 Succès avec l'encodage {encoding} !")
+                                    return df, logs
+                                except:
+                                    continue
         
-        logs.append("❌ Aucun mail correspondant aux critères n'a été validé.")
+        logs.append("❌ Fichier trouvé mais impossible d'analyser son format.")
         return None, logs
     except Exception as e:
-        logs.append(f"💥 ERREUR TECHNIQUE : {str(e)}")
+        logs.append(f"💥 ERREUR : {str(e)}")
         return None, logs
 
 def load_data_via_json_live(sheet_name):
@@ -114,10 +116,8 @@ def load_data_via_json_live(sheet_name):
 df_marques = load_data_via_json_live("marques")
 df_reserves = load_data_via_json_live("reserves")
 
-# Chargement des données + récupération des messages de diagnostic
 df_stock, rapports_diagnostic = fetch_stock_from_gmail(user_email, app_password)
 
-# Barre latérale pour voir ce qu'il se passe en arrière-plan
 with st.sidebar:
     st.subheader("🛠️ Console de Diagnostic")
     for log in rapports_diagnostic:
@@ -131,7 +131,7 @@ if df_marques is not None and df_reserves is not None:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Fichier de stock introuvable dans la boîte mail. Consultez la 'Console de Diagnostic' dans le menu de gauche (flèche >) pour voir l'erreur.")
+            st.error("⚠️ Fichier de stock introuvable ou illisible. Vérifiez les logs de diagnostic à gauche.")
         else:
             col_ean = [c for c in df_stock.columns if 'ean' in c.lower()]
             col_article = [c for c in df_stock.columns if 'art' in c.lower() or 'lib' in c.lower() or 'des' in c.lower()]
