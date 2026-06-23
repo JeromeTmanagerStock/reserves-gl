@@ -24,7 +24,7 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture automatique compatible ZIP et CSV (via pièces jointes ou liens Drive)
+# Fonction de lecture automatique universelle (ZIP, CSV, Liens Drive, Pièces jointes)
 @st.cache_data(ttl=10)
 def fetch_stock_from_gmail(username, password):
     try:
@@ -32,7 +32,8 @@ def fetch_stock_from_gmail(username, password):
         mail.login(username, password.replace(" ", ""))
         mail.select("inbox")
         
-        status, messages = mail.search(None, '(SUBJECT "STOCKS AUTOMATIQUES")')
+        # Recherche ultra-large de n'importe quel mail contenant "STOCKS"
+        status, messages = mail.search(None, '(SUBJECT "STOCKS")')
         if status != "OK" or not messages[0]:
             return None
             
@@ -42,84 +43,69 @@ def fetch_stock_from_gmail(username, password):
             raw_email = data[0][1]
             msg = email.message_from_bytes(raw_email)
             
-            # 1. Extraction du texte pour chercher un lien Google Drive (cas des fichiers lourds de l'ERP)
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    content_type = part.get_content_type()
-                    if content_type in ["text/plain", "text/html"]:
-                        try:
-                            body += part.get_payload(decode=True).decode('utf-8')
-                        except:
-                            pass
-            else:
-                body = msg.get_payload(decode=True).decode('utf-8')
-                
-            # Recherche d'un ID de fichier Google Drive
-            drive_match = re.search(r'https://drive\.google\.com/file/d/([a-zA-Z0-9-_]+)', body)
-            if drive_match:
-                file_id = drive_match.group(1)
-                # On tente d'abord de le télécharger comme un fichier brut
-                download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv"
-                try:
-                    req = urllib.request.Request(download_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req) as response:
-                        file_bytes = response.read()
-                    
-                    # Est-ce un fichier ZIP ?
-                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
-                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-                            # On prend le premier fichier CSV présent dans le ZIP
-                            for zname in z.namelist():
-                                if zname.lower().endswith('.csv'):
-                                    with z.open(zname) as f:
-                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
-                                        df.columns = [c.strip() for c in df.columns]
-                                        return df
-                    else:
-                        # C'est un CSV direct
-                        df = pd.read_csv(io.BytesIO(file_bytes), sep=',', encoding='utf-8', skiprows=1)
-                        df.columns = [c.strip() for c in df.columns]
-                        return df
-                except:
-                    # Si l'export direct Google Sheet échoue (car c'est un vrai binaire ZIP stocké sur Drive)
-                    # On utilise l'URL de téléchargement direct des fichiers Drive
-                    alt_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                    req = urllib.request.Request(alt_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req) as response:
-                        file_bytes = response.read()
-                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
-                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-                            for zname in z.namelist():
-                                if zname.lower().endswith('.csv'):
-                                    with z.open(zname) as f:
-                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
-                                        df.columns = [c.strip() for c in df.columns]
-                                        return df
-
-            # 2. Secours : Si l'ERP l'envoie en pièce jointe standard (sans lien Drive)
+            # 1. Traitement des pièces jointes directes dans le mail
             for part in msg.walk():
                 if part.get_content_maintype() == 'multipart':
                     continue
                 filename = part.get_filename()
                 if filename:
                     filename_lower = filename.lower()
-                    # Pièce jointe ZIP standard
+                    # Si c'est un fichier ZIP attaché
                     if filename_lower.endswith('.zip'):
                         zip_data = part.get_payload(decode=True)
                         with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
                             for zname in z.namelist():
-                                if zname.lower().endswith('.csv'):
+                                # On prend le premier fichier de données trouvé (csv ou txt)
+                                if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
                                     with z.open(zname) as f:
-                                        df = pd.read_csv(f, sep=',', encoding='utf-8', skiprows=1)
+                                        df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
                                         df.columns = [c.strip() for c in df.columns]
                                         return df
-                    # Pièce jointe CSV standard
-                    elif filename_lower.endswith('.csv'):
+                    # Si c'est un fichier CSV attaché
+                    elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
                         csv_data = part.get_payload(decode=True)
-                        df = pd.read_csv(io.BytesIO(csv_data), sep=',', encoding='utf-8', skiprows=1)
+                        df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
                         df.columns = [c.strip() for c in df.columns]
                         return df
+
+            # 2. Traitement si Gmail a converti le fichier lourd en Lien Google Drive
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type in ["text/plain", "text/html"]:
+                        try:
+                            body += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        except:
+                            pass
+            else:
+                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                
+            drive_match = re.search(r'https://drive\.google\.com/file/d/([a-zA-Z0-9-_]+)', body)
+            if drive_match:
+                file_id = drive_match.group(1)
+                
+                # On essaie de le télécharger via l'adresse de téléchargement direct de fichiers Drive
+                alt_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                try:
+                    req = urllib.request.Request(alt_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        file_bytes = response.read()
+                    
+                    if zipfile.is_zipfile(io.BytesIO(file_bytes)):
+                        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                            for zname in z.namelist():
+                                if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
+                                    with z.open(zname) as f:
+                                        df = pd.read_csv(f, sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
+                                        df.columns = [c.strip() for c in df.columns]
+                                        return df
+                    else:
+                        df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine='python', encoding='utf-8', skiprows=1, on_bad_lines='skip')
+                        df.columns = [c.strip() for c in df.columns]
+                        return df
+                except:
+                    pass
         return None
     except Exception:
         return None
@@ -155,33 +141,45 @@ if df_marques is not None and df_reserves is not None:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Fichier de stock introuvable. Assurez-vous que le mail automatique contient bien le fichier ou son lien Drive, et que l'accès au lien est ouvert.")
+            st.error("⚠️ Fichier de stock introuvable. Assurez-vous que le mail automatique est bien arrivé sur votre boîte personnelle et contient la pièce jointe (CSV ou ZIP).")
         else:
+            # On cherche les colonnes correspondantes de manière flexible
+            col_ean = [c for c in df_stock.columns if 'ean' in c.lower()]
+            col_article = [c for c in df_stock.columns if 'art' in c.lower() or 'lib' in c.lower() or 'des' in c.lower()]
+            col_famille = [c for c in df_stock.columns if 'fam' in c.lower() or 'marq' in c.lower()]
+            
+            c_ean = col_ean[0] if col_ean else df_stock.columns[0]
+            c_art = col_article[0] if col_article else df_stock.columns[1] if len(df_stock.columns) > 1 else df_stock.columns[0]
+            c_fam = col_famille[0] if col_famille else c_art
+
             if search_query.isdigit():
-                results = df_stock[df_stock['EAN (Principal)'].astype(str).str.contains(search_query, na=False)]
+                results = df_stock[df_stock[c_ean].astype(str).str.contains(search_query, na=False)]
             else:
                 keywords = search_query.split()
                 condition = True
                 for kw in keywords:
-                    condition &= (df_stock['Article'].astype(str).str.lower().str.contains(kw, na=False) | 
-                                  df_stock['Famille'].astype(str).str.lower().str.contains(kw, na=False))
+                    condition &= (df_stock[c_art].astype(str).str.lower().str.contains(kw, na=False) | 
+                                  df_stock[c_fam].astype(str).str.lower().str.contains(kw, na=False))
                 results = df_stock[condition]
                 
             if not results.empty:
                 st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
-                display_cols = ['Marché', 'Famille', 'Article', 'EAN (Principal)', 'Stock fin (Qté)']
-                available_cols = [c for c in display_cols if c in results.columns]
-                st.dataframe(results[available_cols], use_container_width=True, hide_index=True)
+                # Affichage dynamique des colonnes disponibles
+                display_cols = [c for c in df_stock.columns if any(x in c.lower() for x in ['march', 'fam', 'art', 'ean', 'sto', 'qte', 'fin'])]
+                st.dataframe(results[display_cols if display_cols else df_stock.columns[:5]], use_container_width=True, hide_index=True)
                 
-                premiere_marque = results.iloc[0]['Famille'].strip()
-                col_marque = 'Marques' if 'Marques' in df_marques.columns else df_marques.columns[0]
-                brand_match = df_marques[df_marques[col_marque].astype(str).str.contains(premiere_marque, case=False, na=False)]
-                
-                if not brand_match.empty:
-                    brand_row = brand_match.iloc[0]
-                    nom_reserve = brand_row['Nom de RESERVE'] if 'Nom de RESERVE' in brand_row else "Non spécifiée"
-                    st.markdown("---")
-                    st.subheader(f"📍 Localisation Logistique : Réserve **{nom_reserve}**")
-                    st.info(f"Cette marque est rattachée à la réserve {nom_reserve}.")
+                try:
+                    premiere_marque = str(results.iloc[0][c_fam]).strip()
+                    col_marque = 'Marques' if 'Marques' in df_marques.columns else df_marques.columns[0]
+                    brand_match = df_marques[df_marques[col_marque].astype(str).str.contains(premiere_marque, case=False, na=False)]
+                    
+                    if not brand_match.empty:
+                        brand_row = brand_match.iloc[0]
+                        nom_reserve = brand_row['Nom de RESERVE'] if 'Nom de RESERVE' in brand_row else "Non spécifiée"
+                        st.markdown("---")
+                        st.subheader(f"📍 Localisation Logistique : Réserve **{nom_reserve}**")
+                        st.info(f"Cette marque est rattachée à la réserve {nom_reserve}.")
+                except:
+                    pass
             else:
                 st.error("❌ Aucun article correspondant dans le stock actuel.")
