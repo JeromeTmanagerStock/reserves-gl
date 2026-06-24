@@ -24,7 +24,7 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture universelle
+# Fonction de lecture spécifique pour le format MicroStrategy (utf-16-le + tabulations)
 def fetch_stock_from_gmail(username, password):
     logs = []
     try:
@@ -57,39 +57,44 @@ def fetch_stock_from_gmail(username, password):
                         filename_lower = filename.lower()
                         logs.append(f"📎 Fichier trouvé : {filename}")
                         
-                        encodings_to_try = ['latin-1', 'utf-16', 'utf-8', 'cp1252']
-                        
                         if filename_lower.endswith('.zip'):
                             zip_data = part.get_payload(decode=True)
                             with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
                                 for zname in z.namelist():
                                     if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                        logs.append(f"📖 Extraction de : {zname}")
-                                        content = z.read(zname)
+                                        logs.append(f"📖 Extraction et décodage de : {zname}")
+                                        bytes_content = z.read(zname)
                                         
-                                        for encoding in encodings_to_try:
-                                            # On teste avec ET sans sauter de ligne pour parer à toute structure
-                                            for skip in [0, 1]:
-                                                try:
-                                                    df = pd.read_csv(io.BytesIO(content), sep=None, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
-                                                    df.columns = [str(c).strip() for c in df.columns]
-                                                    # Si on trouve au moins plusieurs colonnes, c'est que c'est bon
-                                                    if len(df.columns) > 1:
-                                                        logs.append(f"🎉 Réussite (Encodage: {encoding}, Ligne sautée: {skip})")
-                                                        logs.append(f"📋 Colonnes lues : {list(df.columns)[:4]}...")
+                                        # Encodages cibles suite au diagnostic précis
+                                        for encoding in ['utf-16', 'utf-16-le', 'latin-1', 'utf-8']:
+                                            try:
+                                                # On teste d'abord avec séparateur tabulation (\t) puis automatique
+                                                for sep in ['\t', None]:
+                                                    df = pd.read_csv(io.BytesIO(bytes_content), sep=sep, engine='python', encoding=encoding, skiprows=0, on_bad_lines='skip')
+                                                    df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
+                                                    
+                                                    if len(df.columns) > 2:
+                                                        # Nettoyage des caractères résiduels dans tout le tableau
+                                                        for col in df.columns:
+                                                            df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
+                                                        
+                                                        logs.append(f"🎉 Succès majeur ! Encodage: {encoding}, Colonnes: {len(df.columns)}")
+                                                        logs.append(f"📋 Premières colonnes valides : {list(df.columns)[:4]}")
                                                         return df, logs
-                                                except:
-                                                    continue
+                                            except:
+                                                continue
                         
                         elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
                             csv_data = part.get_payload(decode=True)
-                            for encoding in encodings_to_try:
-                                for skip in [0, 1]:
+                            for encoding in ['utf-16', 'utf-16-le', 'latin-1', 'utf-8']:
+                                for sep in ['\t', None]:
                                     try:
-                                        df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
-                                        df.columns = [str(c).strip() for c in df.columns]
-                                        if len(df.columns) > 1:
-                                            logs.append(f"🎉 Réussite (Encodage: {encoding}, Ligne sautée: {skip})")
+                                        df = pd.read_csv(io.BytesIO(csv_data), sep=sep, engine='python', encoding=encoding, skiprows=0, on_bad_lines='skip')
+                                        df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
+                                        if len(df.columns) > 2:
+                                            for col in df.columns:
+                                                df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
+                                            logs.append(f"🎉 Succès majeur ! Encodage: {encoding}")
                                             return df, logs
                                     except:
                                         continue
@@ -128,7 +133,7 @@ with st.sidebar:
 
 if df_marques is not None and df_reserves is not None:
     st.subheader("🔍 Barre de recherche unique (EAN, UG ou Désignation)")
-    search_query = st.text_input("Entrez un code EAN ou des mots-clés (ex: polo gris ralph, carhartt...) :", placeholder="Tapez ici...")
+    search_query = st.text_input("Entrez un code EAN, une UG ou des mots-clés (ex: jacquemus, ralph, 370094...) :", placeholder="Tapez ici...")
     
     if search_query:
         search_query = search_query.strip().lower()
@@ -136,11 +141,10 @@ if df_marques is not None and df_reserves is not None:
         if df_stock is None:
             st.error("⚠️ Fichier de stock introuvable ou illisible.")
         else:
-            # RECHERCHE ULTRA-SOUPLE : On cherche le mot clé dans absolument TOUTES les colonnes textuelles
+            # Recherche par mots-clés multi-colonnes propre
             keywords = search_query.split()
-            
-            # Création d'un masque de recherche global sur tout le tableau
             combined_condition = True
+            
             for kw in keywords:
                 local_condition = False
                 for col in df_stock.columns:
@@ -151,24 +155,24 @@ if df_marques is not None and df_reserves is not None:
                 
             if not results.empty:
                 st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
-                # On affiche toutes les colonnes disponibles
                 st.dataframe(results, use_container_width=True, hide_index=True)
                 
-                # Recherche automatique de la marque pour la réserve
+                # Bloc d'association avec la réserve Google Sheet
                 try:
-                    col_famille = [c for c in df_stock.columns if any(x in c.lower() for x in ['fam', 'marq', 'lib', 'art'])]
-                    c_fam = col_famille[0] if col_famille else df_stock.columns[0]
-                    
+                    c_fam = df_stock.columns[0]
+                    for col in df_stock.columns:
+                        if any(x in col.lower() for x in ['fam', 'marq', 'lib', 'art', 'recher']):
+                            c_fam = col
+                            break
+                            
                     premiere_marque = str(results.iloc[0][c_fam]).strip()
                     col_marque = 'Marques' if 'Marques' in df_marques.columns else df_marques.columns[0]
                     
-                    # On cherche si un nom du tableau correspond à notre Google Sheet
                     brand_match = df_marques[df_marques[col_marque].astype(str).str.contains(premiere_marque, case=False, na=False)]
                     if brand_match.empty:
-                        # Deuxième chance : on regarde si la marque du sheet est contenue dans le texte de l'article
                         for _, row_m in df_marques.iterrows():
                             m_name = str(row_m[col_marque]).strip().lower()
-                            if m_name and m_name in premiere_marque.lower():
+                            if m_name and (m_name in premiere_marque.lower() or premiere_marque.lower() in m_name):
                                 brand_match = df_marques[df_marques[col_marque] == row_m[col_marque]]
                                 break
                                 
@@ -177,7 +181,7 @@ if df_marques is not None and df_reserves is not None:
                         nom_reserve = brand_row['Nom de RESERVE'] if 'Nom de RESERVE' in brand_row else "Non spécifiée"
                         st.markdown("---")
                         st.subheader(f"📍 Localisation Logistique : Réserve **{nom_reserve}**")
-                        st.info(f"Cette marque est rattachée à la réserve {nom_reserve}.")
+                        st.info(f"Cette référence est rattachée à la réserve {nom_reserve}.")
                 except:
                     pass
             else:
