@@ -6,7 +6,6 @@ import random
 import imaplib
 import email
 import io
-import re
 import zipfile
 
 # Configuration de l'application
@@ -24,7 +23,7 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture spécifique pour le format MicroStrategy (utf-16-le + tabulations)
+# Fonction de lecture intelligente (Gestion des en-têtes MicroStrategy de plusieurs lignes)
 def fetch_stock_from_gmail(username, password):
     logs = []
     try:
@@ -62,42 +61,45 @@ def fetch_stock_from_gmail(username, password):
                             with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
                                 for zname in z.namelist():
                                     if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                        logs.append(f"📖 Extraction et décodage de : {zname}")
+                                        logs.append(f"📖 Extraction de : {zname}")
                                         bytes_content = z.read(zname)
                                         
-                                        # Encodages cibles suite au diagnostic précis
+                                        # Test des encodages, séparateurs et des sauts de ligne pour trouver les vraies données
                                         for encoding in ['utf-16', 'utf-16-le', 'latin-1', 'utf-8']:
-                                            try:
-                                                # On teste d'abord avec séparateur tabulation (\t) puis automatique
-                                                for sep in ['\t', None]:
-                                                    df = pd.read_csv(io.BytesIO(bytes_content), sep=sep, engine='python', encoding=encoding, skiprows=0, on_bad_lines='skip')
-                                                    df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
-                                                    
-                                                    if len(df.columns) > 2:
-                                                        # Nettoyage des caractères résiduels dans tout le tableau
-                                                        for col in df.columns:
-                                                            df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
+                                            for sep in ['\t', ';', ',']:
+                                                for skip in range(0, 6): # Teste en sautant de 0 à 5 lignes d'introduction
+                                                    try:
+                                                        df = pd.read_csv(io.BytesIO(bytes_content), sep=sep, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
+                                                        df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
                                                         
-                                                        logs.append(f"🎉 Succès majeur ! Encodage: {encoding}, Colonnes: {len(df.columns)}")
-                                                        logs.append(f"📋 Premières colonnes valides : {list(df.columns)[:4]}")
-                                                        return df, logs
-                                            except:
-                                                continue
+                                                        # Si on trouve beaucoup de colonnes (souvent > 5 pour un export ERP) 
+                                                        # et que les colonnes ne contiennent pas de titres génériques comme "STOCKS"
+                                                        if len(df.columns) > 4 and not any('STOCKS' in str(c).upper() for c in df.columns[:2]):
+                                                            # Nettoyage complet
+                                                            for col in df.columns:
+                                                                df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
+                                                            
+                                                            logs.append(f"🎉 Format validé ! Encodage: {encoding}, Lignes sautées: {skip}, Colonnes: {len(df.columns)}")
+                                                            logs.append(f"📋 Vrais Titres détectés : {list(df.columns)[:5]}")
+                                                            return df, logs
+                                                    except:
+                                                        continue
                         
                         elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
                             csv_data = part.get_payload(decode=True)
                             for encoding in ['utf-16', 'utf-16-le', 'latin-1', 'utf-8']:
-                                for sep in ['\t', None]:
-                                    try:
-                                        df = pd.read_csv(io.BytesIO(csv_data), sep=sep, engine='python', encoding=encoding, skiprows=0, on_bad_lines='skip')
-                                        df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
-                                        if len(df.columns) > 2:
-                                            for col in df.columns:
-                                                df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
-                                            logs.append(f"🎉 Succès majeur ! Encodage: {encoding}")
-                                            return df, logs
-                                    except:
-                                        continue
+                                for sep in ['\t', ';', ',']:
+                                    for skip in range(0, 6):
+                                        try:
+                                            df = pd.read_csv(io.BytesIO(csv_data), sep=sep, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
+                                            df.columns = [str(c).strip().replace('\x00', '') for c in df.columns]
+                                            if len(df.columns) > 4 and not any('STOCKS' in str(c).upper() for c in df.columns[:2]):
+                                                for col in df.columns:
+                                                    df[col] = df[col].astype(str).str.replace('\x00', '', regex=False).str.strip()
+                                                logs.append(f"🎉 Format validé ! Encodage: {encoding}, Lignes sautées: {skip}")
+                                                return df, logs
+                                        except:
+                                            continue
         return None, logs
     except Exception as e:
         logs.append(f"💥 ERREUR : {str(e)}")
@@ -141,7 +143,7 @@ if df_marques is not None and df_reserves is not None:
         if df_stock is None:
             st.error("⚠️ Fichier de stock introuvable ou illisible.")
         else:
-            # Recherche par mots-clés multi-colonnes propre
+            # Recherche souple multicritère
             keywords = search_query.split()
             combined_condition = True
             
@@ -157,7 +159,7 @@ if df_marques is not None and df_reserves is not None:
                 st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
                 st.dataframe(results, use_container_width=True, hide_index=True)
                 
-                # Bloc d'association avec la réserve Google Sheet
+                # Bloc de localisation
                 try:
                     c_fam = df_stock.columns[0]
                     for col in df_stock.columns:
