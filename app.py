@@ -24,7 +24,7 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de lecture universelle avec gestion automatique de l'encodage (Spécial MicroStrategy)
+# Fonction de lecture universelle
 def fetch_stock_from_gmail(username, password):
     logs = []
     try:
@@ -57,38 +57,42 @@ def fetch_stock_from_gmail(username, password):
                         filename_lower = filename.lower()
                         logs.append(f"📎 Fichier trouvé : {filename}")
                         
-                        # Définition des encodages à tester (MicroStrategy utilise souvent utf-16 ou latin-1)
-                        encodings_to_try = ['utf-16', 'utf-8', 'latin-1', 'cp1252']
+                        encodings_to_try = ['latin-1', 'utf-16', 'utf-8', 'cp1252']
                         
                         if filename_lower.endswith('.zip'):
                             zip_data = part.get_payload(decode=True)
                             with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
                                 for zname in z.namelist():
                                     if zname.lower().endswith('.csv') or zname.lower().endswith('.txt'):
-                                        logs.append(f"📖 Extraction et lecture de : {zname}")
+                                        logs.append(f"📖 Extraction de : {zname}")
                                         content = z.read(zname)
                                         
                                         for encoding in encodings_to_try:
-                                            try:
-                                                df = pd.read_csv(io.BytesIO(content), sep=None, engine='python', encoding=encoding, skiprows=1, on_bad_lines='skip')
-                                                df.columns = [c.strip() for c in df.columns]
-                                                logs.append(f"🎉 Succès avec l'encodage {encoding} !")
-                                                return df, logs
-                                            except Exception as enc_err:
-                                                continue
+                                            # On teste avec ET sans sauter de ligne pour parer à toute structure
+                                            for skip in [0, 1]:
+                                                try:
+                                                    df = pd.read_csv(io.BytesIO(content), sep=None, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
+                                                    df.columns = [str(c).strip() for c in df.columns]
+                                                    # Si on trouve au moins plusieurs colonnes, c'est que c'est bon
+                                                    if len(df.columns) > 1:
+                                                        logs.append(f"🎉 Réussite (Encodage: {encoding}, Ligne sautée: {skip})")
+                                                        logs.append(f"📋 Colonnes lues : {list(df.columns)[:4]}...")
+                                                        return df, logs
+                                                except:
+                                                    continue
                         
                         elif filename_lower.endswith('.csv') or filename_lower.endswith('.txt'):
                             csv_data = part.get_payload(decode=True)
                             for encoding in encodings_to_try:
-                                try:
-                                    df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding=encoding, skiprows=1, on_bad_lines='skip')
-                                    df.columns = [c.strip() for c in df.columns]
-                                    logs.append(f"🎉 Succès avec l'encodage {encoding} !")
-                                    return df, logs
-                                except:
-                                    continue
-        
-        logs.append("❌ Fichier trouvé mais impossible d'analyser son format.")
+                                for skip in [0, 1]:
+                                    try:
+                                        df = pd.read_csv(io.BytesIO(csv_data), sep=None, engine='python', encoding=encoding, skiprows=skip, on_bad_lines='skip')
+                                        df.columns = [str(c).strip() for c in df.columns]
+                                        if len(df.columns) > 1:
+                                            logs.append(f"🎉 Réussite (Encodage: {encoding}, Ligne sautée: {skip})")
+                                            return df, logs
+                                    except:
+                                        continue
         return None, logs
     except Exception as e:
         logs.append(f"💥 ERREUR : {str(e)}")
@@ -115,7 +119,6 @@ def load_data_via_json_live(sheet_name):
 
 df_marques = load_data_via_json_live("marques")
 df_reserves = load_data_via_json_live("reserves")
-
 df_stock, rapports_diagnostic = fetch_stock_from_gmail(user_email, app_password)
 
 with st.sidebar:
@@ -131,36 +134,44 @@ if df_marques is not None and df_reserves is not None:
         search_query = search_query.strip().lower()
         
         if df_stock is None:
-            st.error("⚠️ Fichier de stock introuvable ou illisible. Vérifiez les logs de diagnostic à gauche.")
+            st.error("⚠️ Fichier de stock introuvable ou illisible.")
         else:
-            col_ean = [c for c in df_stock.columns if 'ean' in c.lower()]
-            col_article = [c for c in df_stock.columns if 'art' in c.lower() or 'lib' in c.lower() or 'des' in c.lower()]
-            col_famille = [c for c in df_stock.columns if 'fam' in c.lower() or 'marq' in c.lower()]
+            # RECHERCHE ULTRA-SOUPLE : On cherche le mot clé dans absolument TOUTES les colonnes textuelles
+            keywords = search_query.split()
             
-            c_ean = col_ean[0] if col_ean else df_stock.columns[0]
-            c_art = col_article[0] if col_article else df_stock.columns[1] if len(df_stock.columns) > 1 else df_stock.columns[0]
-            c_fam = col_famille[0] if col_famille else c_art
-
-            if search_query.isdigit():
-                results = df_stock[df_stock[c_ean].astype(str).str.contains(search_query, na=False)]
-            else:
-                keywords = search_query.split()
-                condition = True
-                for kw in keywords:
-                    condition &= (df_stock[c_art].astype(str).str.lower().str.contains(kw, na=False) | 
-                                  df_stock[c_fam].astype(str).str.lower().str.contains(kw, na=False))
-                results = df_stock[condition]
+            # Création d'un masque de recherche global sur tout le tableau
+            combined_condition = True
+            for kw in keywords:
+                local_condition = False
+                for col in df_stock.columns:
+                    local_condition |= df_stock[col].astype(str).str.lower().str.contains(kw, na=False)
+                combined_condition &= local_condition
+                
+            results = df_stock[combined_condition]
                 
             if not results.empty:
                 st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
-                display_cols = [c for c in df_stock.columns if any(x in c.lower() for x in ['march', 'fam', 'art', 'ean', 'sto', 'qte', 'fin'])]
-                st.dataframe(results[display_cols if display_cols else df_stock.columns[:5]], use_container_width=True, hide_index=True)
+                # On affiche toutes les colonnes disponibles
+                st.dataframe(results, use_container_width=True, hide_index=True)
                 
+                # Recherche automatique de la marque pour la réserve
                 try:
+                    col_famille = [c for c in df_stock.columns if any(x in c.lower() for x in ['fam', 'marq', 'lib', 'art'])]
+                    c_fam = col_famille[0] if col_famille else df_stock.columns[0]
+                    
                     premiere_marque = str(results.iloc[0][c_fam]).strip()
                     col_marque = 'Marques' if 'Marques' in df_marques.columns else df_marques.columns[0]
-                    brand_match = df_marques[df_marques[col_marque].astype(str).str.contains(premiere_marque, case=False, na=False)]
                     
+                    # On cherche si un nom du tableau correspond à notre Google Sheet
+                    brand_match = df_marques[df_marques[col_marque].astype(str).str.contains(premiere_marque, case=False, na=False)]
+                    if brand_match.empty:
+                        # Deuxième chance : on regarde si la marque du sheet est contenue dans le texte de l'article
+                        for _, row_m in df_marques.iterrows():
+                            m_name = str(row_m[col_marque]).strip().lower()
+                            if m_name and m_name in premiere_marque.lower():
+                                brand_match = df_marques[df_marques[col_marque] == row_m[col_marque]]
+                                break
+                                
                     if not brand_match.empty:
                         brand_row = brand_match.iloc[0]
                         nom_reserve = brand_row['Nom de RESERVE'] if 'Nom de RESERVE' in brand_row else "Non spécifiée"
