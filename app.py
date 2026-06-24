@@ -23,6 +23,15 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
+# Fonction d'extraction intelligente des données (anti-erreur d'accents/casse)
+def trouver_valeur_flexible(row, mots_cles, default="Non renseigné"):
+    for col in row.index:
+        col_clean = str(col).lower().replace("é", "e").replace("è", "e").replace("à", "a").strip()
+        if any(kw in col_clean for kw in mots_cles):
+            valeur = str(row[col]).strip()
+            return valeur if valeur and valeur.lower() != "nan" else default
+    return default
+
 # Fonction de lecture automatique du stock (Gmail ZIP/TXT/CSV)
 @st.cache_data(ttl=10)
 def fetch_stock_from_gmail(username, password):
@@ -106,40 +115,59 @@ def load_data_via_json_live(sheet_name):
 
 # Chargement initial des bases de données
 df_marques = load_data_via_json_live("marques")
-df_reserves = load_data_via_json_live("reserves")
 df_stock = fetch_stock_from_gmail(user_email, app_password)
 
 if df_marques is not None:
+    # Nettoyage préventif des noms de colonnes du Google Sheet
+    df_marques.columns = [str(c).strip() for c in df_marques.columns]
+    
     # --- BARRE DE RECHERCHE 1 : LA MARQUE ---
     st.subheader("1️⃣ Filtrer par Marque")
-    col_marque_sheet = 'Marques' if 'Marques' in df_marques.columns else df_marques.columns[0]
-    
+    col_marque_sheet = df_marques.columns[0] # Par défaut la première colonne
+    for c in df_marques.columns:
+        if "marque" in c.lower():
+            col_marque_sheet = c
+            break
+            
     recherche_marque = st.text_input("Entrez le nom d'une marque (ex: Ralph, Jacquemus, Carhartt...) :", key="search_brand").strip()
     
     if recherche_marque:
-        # Recherche de la marque dans le Google Sheet
         brand_match = df_marques[df_marques[col_marque_sheet].astype(str).str.contains(recherche_marque, case=False, na=False)]
         
         if not brand_match.empty:
             infos_marque = brand_match.iloc[0]
             nom_marque_officiel = str(infos_marque[col_marque_sheet]).upper()
             
+            # Récupération intelligente et flexible des valeurs du Sheet
+            emplacement = trouver_valeur_flexible(infos_marque, ["emplacement", "reserve", "nom de reserve"])
+            etage = trouver_valeur_flexible(infos_marque, ["etage", "floor"])
+            stockiste = trouver_valeur_flexible(infos_marque, ["stockiste", "referent", "responsable"])
+            niveau = trouver_valeur_flexible(infos_marque, ["niveau"])
+            
+            plan_url = trouver_valeur_flexible(infos_marque, ["plan"])
+            photo_url = trouver_valeur_flexible(infos_marque, ["photo", "image"])
+            video_url = trouver_valeur_flexible(infos_marque, ["video", "chemin", "film"])
+            
             # --- AFFICHAGE DE LA FICHE LOGISTIQUE ---
             st.success(f"📌 FICHE LOGISTIQUE : **{nom_marque_officiel}**")
             
-            # Création de colonnes visuelles pour la présentation
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
-                st.metric("📍 Emplacement", infos_marque.get('Nom de RESERVE', 'Non renseigné'))
-                st.metric("🏢 Étage Floor", infos_marque.get('Étage floor', infos_marque.get('Etage', 'Non renseigné')))
+                st.write(f"📍 **Emplacement / Réserve :** {emplacement}")
+                st.write(f"🏢 **Étage Floor :** {etage}")
             with c2:
-                st.metric("👤 Stockiste Référent", infos_marque.get('Stockiste référent', infos_marque.get('Referent', 'Non renseigné')))
-                st.metric("📐 Niveau Réserve", infos_marque.get('Niveau de la reserve', infos_marque.get('Niveau', 'Non renseigné')))
-            with c3:
-                # Affichage des photos / plans / vidéos si présents sous forme de liens
-                for lien_col in ['Plan de la reserve', 'Plan', 'Photo du stockiste', 'Chemin video vers cette reserve dediée', 'Video']:
-                    if lien_col in infos_marque and str(infos_marque[lien_col]).startswith('http'):
-                        st.markdown(f"🔗 **[{lien_col}]({infos_marque[lien_col]})**")
+                st.write(f"👤 **Stockiste Référent :** {stockiste}")
+                st.write(f"📐 **Niveau Réserve :** {niveau}")
+            
+            # Liens vers les médias
+            medias = []
+            if plan_url.startswith("http"): medias.append(f"🗺️ [Plan de la réserve]({plan_url})")
+            if photo_url.startswith("http"): medias.append(f"📸 [Photo du stockiste/réserve]({photo_url})")
+            if video_url.startswith("http"): medias.append(f"🎥 [Chemin vidéo de la réserve]({video_url})")
+            
+            if medias:
+                st.markdown("### 🔗 Liens et Médias dédiés :")
+                st.markdown(" | ".join(medias))
 
             st.markdown("---")
             
@@ -149,19 +177,16 @@ if df_marques is not None:
             
             if recherche_ref:
                 if df_stock is None:
-                    st.error("⚠️ Fichier de stock global introuvable ou indisponible pour le moment.")
+                    st.error("⚠️ Fichier de stock global introuvable dans la boîte mail. Vérifiez la console de diagnostic.")
                 else:
-                    # 1. On filtre le stock pour ne garder QUE les lignes de cette marque
                     condition_marque_erp = False
                     for col in df_stock.columns:
                         condition_marque_erp |= df_stock[col].astype(str).str.contains(recherche_marque, case=False, na=False)
                     df_stock_marque = df_stock[condition_marque_erp]
                     
                     if df_stock_marque.empty:
-                        # Si le filtre strict par marque ne donne rien, on cherche dans tout le stock pour ne rien rater
                         df_stock_marque = df_stock
                     
-                    # 2. On applique la recherche de la référence
                     keywords = recherche_ref.split()
                     combined_condition = True
                     for kw in keywords:
@@ -173,10 +198,10 @@ if df_marques is not None:
                     results = df_stock_marque[combined_condition]
                     
                     if not results.empty:
-                        st.write(f"📊 {len(results)} référence(s) trouvée(s) pour votre recherche :")
+                        st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
                         st.dataframe(results, use_container_width=True, hide_index=True)
                     else:
-                        st.error(f"❌ Aucun article correspondant à '{recherche_ref}' trouvé pour la marque {nom_marque_officiel}.")
+                        st.error(f"❌ Aucun article correspondant à '{recherche_ref}' trouvé dans le stock.")
         else:
             st.error(f"❌ La marque '{recherche_marque}' est introuvable dans votre base Google Sheet.")
 else:
