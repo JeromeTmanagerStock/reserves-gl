@@ -24,23 +24,18 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction MAGIQUE renforcée pour extraire l'ID Google Drive et renvoyer le flux brut d'image/vidéo
+# Fonction de conversion de lien Google Drive
 def optimiser_lien_drive(url):
     if not isinstance(url, str) or not url.startswith("http"):
         return url
-    
-    # Si c'est un lien de partage Google Drive
     if "drive.google.com" in url:
-        # Recherche d'un ID de fichier à 33 ou 34 caractères (standard Google)
+        url = url.split("?")[0].split("&")[0]
         match_file = re.search(r"/file/d/([a-zA-Z0-9_-]{25,50})", url)
         if match_file:
             return f"https://drive.google.com/uc?export=download&id={match_file.group(1)}"
-            
-        # Recherche alternative via le paramètre id=
         match_id = re.search(r"id=([a-zA-Z0-9_-]{25,50})", url)
         if match_id:
             return f"https://drive.google.com/uc?export=download&id={match_id.group(1)}"
-            
     return url
 
 # Fonction d'extraction intelligente des données
@@ -158,7 +153,7 @@ if df_marques is not None:
             infos_marque = brand_match.iloc[0]
             nom_marque_officiel = str(infos_marque[col_marque_sheet]).upper()
             
-            # Extraction des colonnes
+            # Extraction des données
             emplacement = trouver_valeur_flexible(infos_marque, ["emplacement", "reserve", "nom de reserve"])
             etage = trouver_valeur_flexible(infos_marque, ["etage", "floor"])
             stockiste = trouver_valeur_flexible(infos_marque, ["stockiste", "referent", "responsable"])
@@ -179,37 +174,53 @@ if df_marques is not None:
                 st.markdown(f"📐 **Niveau Réserve :** {niveau}")
                 st.markdown(f"🏢 **Étage Floor :** {etage}")
                 
-                # Prénom du stockiste extrait textuellement du Sheet
-                st.markdown(f"👤 **Stockiste Référent :** {stockiste if not str(stockiste).startswith('http') else 'Renseigné (voir photo)'}")
+                # Affichage textuel du prénom
+                st.markdown(f"👤 **Stockiste Référent :** {stockiste if not str(stockiste).startswith('http') else 'Disponible (voir photo)'}")
             
             with col_photo_stockiste:
-                # Affichage DIRECT de la photo du stockiste
+                # Affichage sécurisé de la photo du stockiste
                 cible_photo = photo_url if photo_url.startswith("http") else stockiste
                 if isinstance(cible_photo, str) and cible_photo.startswith("http"):
-                    st.image(optimiser_lien_drive(cible_photo), caption="👤 Photo du Référent", width=160)
+                    try:
+                        st.image(optimiser_lien_drive(cible_photo), caption="👤 Référent", width=140)
+                    except Exception:
+                        st.caption("👤 Photo disponible dans le dossier partagé")
             
-            # --- ZONE DES MÉDIAS DE LA RÉSERVE (AFFICHAGE DIRECT REQUIS) ---
+            # --- ZONE DES MÉDIAS DE LA RÉSERVE ---
             st.markdown("### 🗺️ Visualisation de la Réserve & Accès")
             col_plan, col_panneau, col_video = st.columns(3)
             
             with col_plan:
                 st.markdown("#### 📐 Plan de la Réserve")
                 if plan_url.startswith("http"):
-                    st.image(optimiser_lien_drive(plan_url), use_container_width=True)
+                    try:
+                        st.image(optimiser_lien_drive(plan_url), use_container_width=True)
+                    except Exception:
+                        st.caption("⚠️ Problème de chargement de l'image directe")
+                    st.link_button("🗺️ Ouvrir le Plan Réserve", plan_url, use_container_width=True)
                 else:
                     st.caption("Aucun plan disponible")
                     
             with col_panneau:
                 st.markdown("#### 🪧 Panneau de la Réserve")
                 if panneau_url.startswith("http"):
-                    st.image(optimiser_lien_drive(panneau_url), use_container_width=True)
+                    try:
+                        st.image(optimiser_lien_drive(panneau_url), use_container_width=True)
+                    except Exception:
+                        st.caption("⚠️ Problème de chargement du visuel direct")
+                    st.link_button("🪧 Voir le Panneau Réserve", panneau_url, use_container_width=True)
                 else:
                     st.caption("Aucun visuel de panneau disponible")
                     
             with col_video:
                 st.markdown("#### 🎥 Chemin d'orientation")
                 if video_url.startswith("http"):
-                    st.video(optimiser_lien_drive(video_url))
+                    try:
+                        st.video(optimiser_lien_drive(video_url))
+                    except Exception:
+                        # Fallback au bouton si le format vidéo n'est pas supporté par le navigateur
+                        st.info("🎥 Format vidéo lourd. Ouvrez-la directement :")
+                        st.link_button("🎥 Regarder la vidéo d'accès", video_url, use_container_width=True)
                 else:
                     st.caption("Aucune vidéo disponible")
 
@@ -246,7 +257,3 @@ if df_marques is not None:
                         st.dataframe(results, use_container_width=True, hide_index=True)
                     else:
                         st.error(f"❌ Aucun article correspondant trouvé.")
-        else:
-            st.error(f"❌ La marque '{recherche_marque}' est introuvable.")
-else:
-    st.error("❌ Impossible de charger l'onglet 'marques' de votre Google Sheet.")
