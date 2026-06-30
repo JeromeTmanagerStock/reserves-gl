@@ -24,18 +24,17 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction de conversion de lien Google Drive
+# Fonction ultra-robuste de conversion de lien Google Drive vers Image/Média Brut
 def optimiser_lien_drive(url):
     if not isinstance(url, str) or not url.startswith("http"):
         return url
     if "drive.google.com" in url:
-        url = url.split("?")[0].split("&")[0]
-        match_file = re.search(r"/file/d/([a-zA-Z0-9_-]{25,50})", url)
-        if match_file:
-            return f"https://drive.google.com/uc?export=download&id={match_file.group(1)}"
-        match_id = re.search(r"id=([a-zA-Z0-9_-]{25,50})", url)
-        if match_id:
-            return f"https://drive.google.com/uc?export=download&id={match_id.group(1)}"
+        # Extrait l'ID unique du fichier de 25 à 50 caractères
+        match = re.search(r"(?:id=|/d/|/file/d/)([a-zA-Z0-9_-]{25,50})", url)
+        if match:
+            file_id = match.group(1)
+            # URL de téléchargement direct indispensable pour l'affichage brut
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
 # Fonction d'extraction intelligente des données
@@ -153,14 +152,17 @@ if df_marques is not None:
             infos_marque = brand_match.iloc[0]
             nom_marque_officiel = str(infos_marque[col_marque_sheet]).upper()
             
-            # Extraction des données
+            # Extraction des données textuelles et médias
             emplacement = trouver_valeur_flexible(infos_marque, ["emplacement", "reserve", "nom de reserve"])
             etage = trouver_valeur_flexible(infos_marque, ["etage", "floor"])
-            stockiste = trouver_valeur_flexible(infos_marque, ["stockiste", "referent", "responsable"])
             niveau = trouver_valeur_flexible(infos_marque, ["niveau"])
             
+            # Ciblage précis pour le référent ("nom du referent", "stockiste", etc.)
+            stockiste = trouver_valeur_flexible(infos_marque, ["referent", "nom du referent", "stockiste"])
+            
+            # Extraction propre des médias de la ligne
             plan_url = trouver_valeur_flexible(infos_marque, ["plan"])
-            photo_url = trouver_valeur_flexible(infos_marque, ["photo", "image"])
+            photo_url = trouver_valeur_flexible(infos_marque, ["photo", "image", "visuel"])
             video_url = trouver_valeur_flexible(infos_marque, ["video", "chemin", "film"])
             panneau_url = trouver_valeur_flexible(infos_marque, ["panneau", "enseigne"])
             
@@ -173,56 +175,53 @@ if df_marques is not None:
                 st.markdown(f"📍 **Réserve :** {emplacement}")
                 st.markdown(f"📐 **Niveau Réserve :** {niveau}")
                 st.markdown(f"🏢 **Étage Floor :** {etage}")
-                
-                # Affichage textuel du prénom
-                st.markdown(f"👤 **Stockiste Référent :** {stockiste if not str(stockiste).startswith('http') else 'Disponible (voir photo)'}")
+                st.markdown(f"👤 **Référent de Réserve :** {stockiste if not str(stockiste).startswith('http') else 'Lien disponible dans le tableau'}")
             
             with col_photo_stockiste:
-                # Affichage sécurisé de la photo du stockiste
-                cible_photo = photo_url if photo_url.startswith("http") else stockiste
-                if isinstance(cible_photo, str) and cible_photo.startswith("http"):
+                # Si le champ photo ou le champ référent contient un lien, on tente d'afficher l'avatar
+                lien_avatar = photo_url if photo_url.startswith("http") else stockiste
+                if isinstance(lien_avatar, str) and lien_avatar.startswith("http"):
                     try:
-                        st.image(optimiser_lien_drive(cible_photo), caption="👤 Référent", width=140)
+                        st.image(optimiser_lien_drive(lien_avatar), caption="👤 Référent", width=140)
                     except Exception:
-                        st.caption("👤 Photo disponible dans le dossier partagé")
+                        st.caption("👤 Photo disponible sur le Drive")
             
             # --- ZONE DES MÉDIAS DE LA RÉSERVE ---
+            st.markdown("---")
             st.markdown("### 🗺️ Visualisation de la Réserve & Accès")
             col_plan, col_panneau, col_video = st.columns(3)
             
             with col_plan:
                 st.markdown("#### 📐 Plan de la Réserve")
-                if plan_url.startswith("http"):
-                    try:
-                        st.image(optimiser_lien_drive(plan_url), use_container_width=True)
-                    except Exception:
-                        st.caption("⚠️ Problème de chargement de l'image directe")
-                    st.link_button("🗺️ Ouvrir le Plan Réserve", plan_url, use_container_width=True)
+                if isinstance(plan_url, str) and plan_url.startswith("http"):
+                    lien_direct_plan = optimiser_lien_drive(plan_url)
+                    # Affichage direct de l'image
+                    st.image(lien_direct_plan, use_container_width=True)
+                    st.link_button("🗺️ Zoomer / Ouvrir le Plan", plan_url, use_container_width=True)
                 else:
-                    st.caption("Aucun plan disponible")
+                    st.caption("❌ Aucun plan configuré ou lien invalide")
                     
             with col_panneau:
-                st.markdown("#### 🪧 Panneau de la Réserve")
-                if panneau_url.startswith("http"):
-                    try:
-                        st.image(optimiser_lien_drive(panneau_url), use_container_width=True)
-                    except Exception:
-                        st.caption("⚠️ Problème de chargement du visuel direct")
-                    st.link_button("🪧 Voir le Panneau Réserve", panneau_url, use_container_width=True)
+                st.markdown("#### 🪧 Panneau Enseigne")
+                if isinstance(panneau_url, str) and panneau_url.startswith("http"):
+                    lien_direct_panneau = optimiser_lien_drive(panneau_url)
+                    # Affichage direct de l'image du panneau
+                    st.image(lien_direct_panneau, use_container_width=True)
+                    st.link_button("🪧 Ouvrir l'Enseigne", panneau_url, use_container_width=True)
                 else:
-                    st.caption("Aucun visuel de panneau disponible")
+                    st.caption("❌ Aucun visuel de panneau disponible")
                     
             with col_video:
                 st.markdown("#### 🎥 Chemin d'orientation")
-                if video_url.startswith("http"):
+                if isinstance(video_url, str) and video_url.startswith("http"):
+                    lien_direct_video = optimiser_lien_drive(video_url)
                     try:
-                        st.video(optimiser_lien_drive(video_url))
+                        st.video(lien_direct_video)
                     except Exception:
-                        # Fallback au bouton si le format vidéo n'est pas supporté par le navigateur
-                        st.info("🎥 Format vidéo lourd. Ouvrez-la directement :")
+                        st.info("🎥 Lecture fluide :")
                         st.link_button("🎥 Regarder la vidéo d'accès", video_url, use_container_width=True)
                 else:
-                    st.caption("Aucune vidéo disponible")
+                    st.caption("❌ Aucune vidéo disponible")
 
             st.markdown("---")
             
