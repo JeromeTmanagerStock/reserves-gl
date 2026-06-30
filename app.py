@@ -24,23 +24,23 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction pour nettoyer et transformer les liens Google Drive pour l'intégration directe
+# Fonction MAGIQUE renforcée pour extraire l'ID Google Drive et renvoyer le flux brut d'image/vidéo
 def optimiser_lien_drive(url):
     if not isinstance(url, str) or not url.startswith("http"):
         return url
+    
+    # Si c'est un lien de partage Google Drive
     if "drive.google.com" in url:
-        # Nettoyage des paramètres de fin de lien classiques
-        url = url.split("?")[0].split("&")[0]
-        # Extraction de l'ID du fichier via Expression Régulière (Regex)
-        match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", url)
-        if match:
-            id_fichier = match.group(1)
-            return f"https://drive.google.com/uc?export=download&id={id_fichier}"
-        # Extraction si le lien utilise le format d'id direct (?id=...)
-        match_id = re.search(r"id=([a-zA-Z0-9_-]+)", url)
+        # Recherche d'un ID de fichier à 33 ou 34 caractères (standard Google)
+        match_file = re.search(r"/file/d/([a-zA-Z0-9_-]{25,50})", url)
+        if match_file:
+            return f"https://drive.google.com/uc?export=download&id={match_file.group(1)}"
+            
+        # Recherche alternative via le paramètre id=
+        match_id = re.search(r"id=([a-zA-Z0-9_-]{25,50})", url)
         if match_id:
-            id_fichier = match_id.group(1)
-            return f"https://drive.google.com/uc?export=download&id={id_fichier}"
+            return f"https://drive.google.com/uc?export=download&id={match_id.group(1)}"
+            
     return url
 
 # Fonction d'extraction intelligente des données
@@ -49,7 +49,6 @@ def trouver_valeur_flexible(row, mots_cles, default="Non renseigné"):
         col_clean = str(col).lower().replace("é", "e").replace("è", "e").replace("à", "a").strip()
         if any(kw in col_clean for kw in mots_cles):
             valeur = str(row[col]).strip()
-            # Retrait propre du .0 pour les chiffres (ex: niveau -3.0 devient -3)
             if valeur.endswith(".0"):
                 valeur = valeur[:-2]
             return valeur if valeur and valeur.lower() != "nan" else default
@@ -159,7 +158,7 @@ if df_marques is not None:
             infos_marque = brand_match.iloc[0]
             nom_marque_officiel = str(infos_marque[col_marque_sheet]).upper()
             
-            # Extraction des données nettoyées
+            # Extraction des colonnes
             emplacement = trouver_valeur_flexible(infos_marque, ["emplacement", "reserve", "nom de reserve"])
             etage = trouver_valeur_flexible(infos_marque, ["etage", "floor"])
             stockiste = trouver_valeur_flexible(infos_marque, ["stockiste", "referent", "responsable"])
@@ -170,7 +169,7 @@ if df_marques is not None:
             video_url = trouver_valeur_flexible(infos_marque, ["video", "chemin", "film"])
             panneau_url = trouver_valeur_flexible(infos_marque, ["panneau", "enseigne"])
             
-            # --- AFFICHAGE DE LA FICHE LOGISTIQUE CORRIGÉE ---
+            # --- AFFICHAGE DE LA FICHE LOGISTIQUE ---
             st.success(f"📌 FICHE LOGISTIQUE : **{nom_marque_officiel}**")
             
             col_texte, col_photo_stockiste = st.columns([2, 1])
@@ -180,43 +179,74 @@ if df_marques is not None:
                 st.markdown(f"📐 **Niveau Réserve :** {niveau}")
                 st.markdown(f"🏢 **Étage Floor :** {etage}")
                 
-                # Affichage propre du prénom du Stockiste Référent
-                if stockiste.startswith("http"):
-                    st.markdown(f"👤 **Stockiste Référent :** Disponible (voir photo)")
-                else:
-                    st.markdown(f"👤 **Stockiste Référent :** {stockiste}")
+                # Prénom du stockiste extrait textuellement du Sheet
+                st.markdown(f"👤 **Stockiste Référent :** {stockiste if not str(stockiste).startswith('http') else 'Renseigné (voir photo)'}")
             
             with col_photo_stockiste:
-                # 👤 Affichage de la photo du stockiste
-                if photo_url.startswith("http") or stockiste.startswith("http"):
-                    lien_photo_source = photo_url if photo_url.startswith("http") else stockiste
-                    lien_photo_eligible = optimiser_lien_drive(lien_photo_source)
-                    try:
-                        st.image(lien_photo_eligible, caption=f"👤 {stockiste if not stockiste.startswith('http') else 'Référent'}", width=150)
-                    except Exception:
-                        pass
+                # Affichage DIRECT de la photo du stockiste
+                cible_photo = photo_url if photo_url.startswith("http") else stockiste
+                if isinstance(cible_photo, str) and cible_photo.startswith("http"):
+                    st.image(optimiser_lien_drive(cible_photo), caption="👤 Photo du Référent", width=160)
             
-            # --- ZONE DES MÉDIAS VISUELS DE LA RÉSERVE ---
+            # --- ZONE DES MÉDIAS DE LA RÉSERVE (AFFICHAGE DIRECT REQUIS) ---
             st.markdown("### 🗺️ Visualisation de la Réserve & Accès")
             col_plan, col_panneau, col_video = st.columns(3)
             
             with col_plan:
                 st.markdown("#### 📐 Plan de la Réserve")
                 if plan_url.startswith("http"):
-                    lien_plan_direct = optimiser_lien_drive(plan_url)
-                    try:
-                        st.image(lien_plan_direct, use_container_width=True)
-                    except Exception:
-                        st.info("ℹ️ Format d'image protégé ou externe.")
-                    st.link_button("🗺️ Ouvrir le Plan Réserve", plan_url, use_container_width=True)
+                    st.image(optimiser_lien_drive(plan_url), use_container_width=True)
                 else:
                     st.caption("Aucun plan disponible")
                     
             with col_panneau:
                 st.markdown("#### 🪧 Panneau de la Réserve")
                 if panneau_url.startswith("http"):
-                    lien_panneau_direct = optimiser_lien_drive(panneau_url)
-                    try:
-                        st.image(lien_panneau_direct, use_container_width=True)
-                    except Exception:
-                        st
+                    st.image(optimiser_lien_drive(panneau_url), use_container_width=True)
+                else:
+                    st.caption("Aucun visuel de panneau disponible")
+                    
+            with col_video:
+                st.markdown("#### 🎥 Chemin d'orientation")
+                if video_url.startswith("http"):
+                    st.video(optimiser_lien_drive(video_url))
+                else:
+                    st.caption("Aucune vidéo disponible")
+
+            st.markdown("---")
+            
+            # --- BARRE DE RECHERCHE 2 : RECHERCHE ARTICLES ---
+            st.subheader(f"2️⃣ Préciser la recherche chez {nom_marque_officiel}")
+            recherche_ref = st.text_input("Entrez un code EAN, une UG ou un mot-clé (ex: casquette, polo...) :", key="search_ref").strip().lower()
+            
+            if recherche_ref:
+                if df_stock is None:
+                    st.error("⚠️ Fichier de stock global introuvable.")
+                else:
+                    condition_marque_erp = False
+                    for col in df_stock.columns:
+                        condition_marque_erp |= df_stock[col].astype(str).str.contains(recherche_marque, case=False, na=False)
+                    df_stock_marque = df_stock[condition_marque_erp]
+                    
+                    if df_stock_marque.empty:
+                        df_stock_marque = df_stock
+                    
+                    keywords = recherche_ref.split()
+                    combined_condition = True
+                    for kw in keywords:
+                        local_condition = False
+                        for col in df_stock_marque.columns:
+                            local_condition |= df_stock_marque[col].astype(str).str.lower().str.contains(kw, na=False)
+                        combined_condition &= local_condition
+                        
+                    results = df_stock_marque[combined_condition]
+                    
+                    if not results.empty:
+                        st.write(f"📊 {len(results)} référence(s) trouvée(s) :")
+                        st.dataframe(results, use_container_width=True, hide_index=True)
+                    else:
+                        st.error(f"❌ Aucun article correspondant trouvé.")
+        else:
+            st.error(f"❌ La marque '{recherche_marque}' est introuvable.")
+else:
+    st.error("❌ Impossible de charger l'onglet 'marques' de votre Google Sheet.")
