@@ -24,31 +24,37 @@ except Exception:
     st.error("❌ Erreur de configuration des clés secrètes sur le serveur Streamlit.")
     st.stop()
 
-# Fonction ultra-robuste de conversion de lien Google Drive vers Image/Média Brut
+# Fonction de conversion Google Drive vers lien brut d'affichage web (lh3)
 def optimiser_lien_drive(url):
     if not isinstance(url, str) or not url.startswith("http"):
         return url
     if "drive.google.com" in url:
-        # Extrait l'ID unique du fichier de 25 à 50 caractères
+        # Recherche précise de l'ID unique de 25 à 50 caractères
         match = re.search(r"(?:id=|/d/|/file/d/)([a-zA-Z0-9_-]{25,50})", url)
         if match:
             file_id = match.group(1)
-            # URL de téléchargement direct indispensable pour l'affichage brut
-            return f"https://drive.google.com/uc?export=download&id={file_id}"
+            # Format d'affichage direct web officiel et sécurisé de Google
+            return f"https://lh3.googleusercontent.com/d/{file_id}"
     return url
 
-# Fonction d'extraction intelligente des données
-def trouver_valeur_flexible(row, mots_cles, default="Non renseigné"):
+# Extracteur strict pour éviter la confusion entre colonnes de Texte et colonnes d'Images
+def extraire_colonne(row, exact_name, keys_contain, keys_exclude=[]):
+    # 1. Tentative de correspondance exacte en priorité
+    for col in row.index:
+        if str(col).strip().lower() == exact_name.lower():
+            val = str(row[col]).strip()
+            return val if val and val.lower() != "nan" else "Non renseigné"
+            
+    # 2. Recherche par mots-clés si non trouvé précisément
     for col in row.index:
         col_clean = str(col).lower().replace("é", "e").replace("è", "e").replace("à", "a").strip()
-        if any(kw in col_clean for kw in mots_cles):
-            valeur = str(row[col]).strip()
-            if valeur.endswith(".0"):
-                valeur = valeur[:-2]
-            return valeur if valeur and valeur.lower() != "nan" else default
-    return default
+        if any(k in col_clean for k in keys_contain):
+            if not any(x in col_clean for x in keys_exclude):
+                val = str(row[col]).strip()
+                return val if val and val.lower() != "nan" else "Non renseigné"
+    return "Non renseigné"
 
-# Fonction de lecture du stock depuis Gmail
+# Moteur d'extraction des stocks depuis Gmail
 @st.cache_data(ttl=10)
 def fetch_stock_from_gmail(username, password):
     try:
@@ -109,7 +115,7 @@ def fetch_stock_from_gmail(username, password):
     except:
         return None
 
-# Fonction de lecture Google Sheets
+# Moteur de lecture Google Sheets
 def load_data_via_json_live(sheet_name):
     try:
         random_cache_buster = random.randint(1, 999999)
@@ -129,7 +135,7 @@ def load_data_via_json_live(sheet_name):
     except:
         return None
 
-# Chargement initial des bases de données
+# Chargement initial
 df_marques = load_data_via_json_live("marques")
 df_stock = fetch_stock_from_gmail(user_email, app_password)
 
@@ -152,81 +158,97 @@ if df_marques is not None:
             infos_marque = brand_match.iloc[0]
             nom_marque_officiel = str(infos_marque[col_marque_sheet]).upper()
             
-            # Extraction des données textuelles et médias
-            emplacement = trouver_valeur_flexible(infos_marque, ["emplacement", "reserve", "nom de reserve"])
-            etage = trouver_valeur_flexible(infos_marque, ["etage", "floor"])
-            niveau = trouver_valeur_flexible(infos_marque, ["niveau"])
+            # --- APPLICATON DE VOS NOUVELLES COLONNES EXACTES ---
+            nom_reserve = extraire_colonne(infos_marque, "Nom de RESERVE", ["nom de reserve", "reserve"])
+            ex_reserve = extraire_colonne(infos_marque, "ex RESERVE", ["ex reserve"])
+            niveau_reserve = extraire_colonne(infos_marque, "niveau reserve", ["niveau reserve", "niveau"])
+            groupe_rayon = extraire_colonne(infos_marque, "Groupe", ["groupe"])
+            etage_floor = extraire_colonne(infos_marque, "etage floor", ["etage floor", "etage"])
             
-            # Ciblage précis pour le référent ("nom du referent", "stockiste", etc.)
-            stockiste = trouver_valeur_flexible(infos_marque, ["referent", "nom du referent", "stockiste"])
+            # Responsables (Données Textuelles)
+            stockiste_nom = extraire_colonne(infos_marque, "Stockiste REFERENT", ["stockiste referent"], keys_exclude=["visuel", "image"])
+            manager_nom = extraire_colonne(infos_marque, "Manager Vente", ["manager vente", "manager"], keys_exclude=["visuel", "image"])
             
-            # Extraction propre des médias de la ligne
-            plan_url = trouver_valeur_flexible(infos_marque, ["plan"])
-            photo_url = trouver_valeur_flexible(infos_marque, ["photo", "image", "visuel"])
-            video_url = trouver_valeur_flexible(infos_marque, ["video", "chemin", "film"])
-            panneau_url = trouver_valeur_flexible(infos_marque, ["panneau", "enseigne"])
+            # Liens Médias
+            plan_url = extraire_colonne(infos_marque, "PLAN", ["plan"])
+            logo_reserve_url = extraire_colonne(infos_marque, "Logo Reserve", ["logo reserve"])
+            video_url = extraire_colonne(infos_marque, "video du CHEMIN", ["video"])
+            visuel_stockiste_url = extraire_colonne(infos_marque, "VISUEL Stockiste REFERENT", ["visuel stockiste"])
+            image_manager_url = extraire_colonne(infos_marque, "image manager vente", ["image manager"])
             
-            # --- AFFICHAGE DE LA FICHE LOGISTIQUE ---
-            st.success(f"📌 FICHE LOGISTIQUE : **{nom_marque_officiel}**")
+            # Nettoyage pour retirer le ".0" des chiffres d'étages ou niveaux
+            if niveau_reserve.endswith(".0"): niveau_reserve = niveau_reserve[:-2]
+            if etage_floor.endswith(".0"): etage_floor = etage_floor[:-2]
             
-            col_texte, col_photo_stockiste = st.columns([2, 1])
+            # --- AFFICHAGE DE LA FICHE ---
+            st.success(f"📌 FICHE TECHNIQUE LOGISTIQUE : **{nom_marque_officiel}**")
             
-            with col_texte:
-                st.markdown(f"📍 **Réserve :** {emplacement}")
-                st.markdown(f"📐 **Niveau Réserve :** {niveau}")
-                st.markdown(f"🏢 **Étage Floor :** {etage}")
-                st.markdown(f"👤 **Référent de Réserve :** {stockiste if not str(stockiste).startswith('http') else 'Lien disponible dans le tableau'}")
+            # Section 1 : Localisation
+            col_info1, col_info2, col_info3 = st.columns(3)
+            with col_info1:
+                st.markdown(f"📦 **Nom de RÉSERVE :** `{nom_reserve}`")
+                st.markdown(f"🕰️ **Ancienne Réserve (ex) :** {ex_reserve}")
+            with col_info2:
+                st.markdown(f"📐 **Niveau Réserve :** {niveau_reserve}")
+                st.markdown(f"🏢 **Étage Floor :** {etage_floor}")
+            with col_info3:
+                st.markdown(f"🏷️ **Groupe / Rayon :** {groupe_rayon}")
             
-            with col_photo_stockiste:
-                # Si le champ photo ou le champ référent contient un lien, on tente d'afficher l'avatar
-                lien_avatar = photo_url if photo_url.startswith("http") else stockiste
-                if isinstance(lien_avatar, str) and lien_avatar.startswith("http"):
-                    try:
-                        st.image(optimiser_lien_drive(lien_avatar), caption="👤 Référent", width=140)
-                    except Exception:
-                        st.caption("👤 Photo disponible sur le Drive")
-            
-            # --- ZONE DES MÉDIAS DE LA RÉSERVE ---
             st.markdown("---")
-            st.markdown("### 🗺️ Visualisation de la Réserve & Accès")
-            col_plan, col_panneau, col_video = st.columns(3)
             
-            with col_plan:
+            # Section 2 : Trombinoscope (Contacts Référents)
+            st.markdown("### 👥 Contacts Référents")
+            col_stk_txt, col_stk_img, col_mngr_txt, col_mngr_img = st.columns([2, 1, 2, 1])
+            
+            with col_stk_txt:
+                st.markdown(f"👤 **Stockiste RÉFÉRENT :**")
+                st.info(stockiste_nom)
+            with col_stk_img:
+                if visuel_stockiste_url.startswith("http"):
+                    st.image(optimiser_lien_drive(visuel_stockiste_url), caption="Stockiste", width=130)
+                else:
+                    st.caption("🚫 Aucun visuel")
+                    
+            with col_mngr_txt:
+                st.markdown(f"💼 **Manager Vente :**")
+                st.info(manager_nom)
+            with col_mngr_img:
+                if image_manager_url.startswith("http"):
+                    st.image(optimiser_lien_drive(image_manager_url), caption="Manager Vente", width=130)
+                else:
+                    st.caption("🚫 Aucun visuel")
+            
+            st.markdown("---")
+            
+            # Section 3 : Visualisation direct des Médias (Zéro boutons images)
+            st.markdown("### 🗺️ Visualisation Directe de la Réserve")
+            col_plan_view, col_logo_view, col_video_view = st.columns(3)
+            
+            with col_plan_view:
                 st.markdown("#### 📐 Plan de la Réserve")
-                if isinstance(plan_url, str) and plan_url.startswith("http"):
-                    lien_direct_plan = optimiser_lien_drive(plan_url)
-                    # Affichage direct de l'image
-                    st.image(lien_direct_plan, use_container_width=True)
-                    st.link_button("🗺️ Zoomer / Ouvrir le Plan", plan_url, use_container_width=True)
+                if plan_url.startswith("http"):
+                    st.image(optimiser_lien_drive(plan_url), use_container_width=True)
                 else:
-                    st.caption("❌ Aucun plan configuré ou lien invalide")
+                    st.caption("❌ Aucun plan disponible")
                     
-            with col_panneau:
-                st.markdown("#### 🪧 Panneau Enseigne")
-                if isinstance(panneau_url, str) and panneau_url.startswith("http"):
-                    lien_direct_panneau = optimiser_lien_drive(panneau_url)
-                    # Affichage direct de l'image du panneau
-                    st.image(lien_direct_panneau, use_container_width=True)
-                    st.link_button("🪧 Ouvrir l'Enseigne", panneau_url, use_container_width=True)
+            with col_logo_view:
+                st.markdown("#### 🪧 Enseigne / Logo Réserve")
+                if logo_reserve_url.startswith("http"):
+                    st.image(optimiser_lien_drive(logo_reserve_url), use_container_width=True)
                 else:
-                    st.caption("❌ Aucun visuel de panneau disponible")
+                    st.caption("❌ Aucun logo disponible")
                     
-            with col_video:
-                st.markdown("#### 🎥 Chemin d'orientation")
-                if isinstance(video_url, str) and video_url.startswith("http"):
-                    lien_direct_video = optimiser_lien_drive(video_url)
-                    try:
-                        st.video(lien_direct_video)
-                    except Exception:
-                        st.info("🎥 Lecture fluide :")
-                        st.link_button("🎥 Regarder la vidéo d'accès", video_url, use_container_width=True)
+            with col_video_view:
+                st.markdown("#### 🎥 Chemin d'Orientation Vidéo")
+                if video_url.startswith("http"):
+                    st.video(video_url)
                 else:
-                    st.caption("❌ Aucune vidéo disponible")
+                    st.caption("❌ Aucune vidéo configurée")
 
             st.markdown("---")
             
-            # --- BARRE DE RECHERCHE 2 : RECHERCHE ARTICLES ---
-            st.subheader(f"2️⃣ Préciser la recherche chez {nom_marque_officiel}")
+            # --- BARRE DE RECHERCHE ARTICLES ---
+            st.subheader(f"2️⃣ Préciser la recherche d'articles chez {nom_marque_officiel}")
             recherche_ref = st.text_input("Entrez un code EAN, une UG ou un mot-clé (ex: casquette, polo...) :", key="search_ref").strip().lower()
             
             if recherche_ref:
